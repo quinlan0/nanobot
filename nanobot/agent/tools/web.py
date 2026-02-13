@@ -109,8 +109,6 @@ class WebFetchTool(Tool):
         self.max_chars = max_chars
     
     async def execute(self, url: str, extractMode: str = "markdown", maxChars: int | None = None, **kwargs: Any) -> str:
-        from readability import Document
-
         max_chars = maxChars or self.max_chars
 
         # Validate URL before fetching
@@ -126,18 +124,22 @@ class WebFetchTool(Tool):
             ) as client:
                 r = await client.get(url, headers={"User-Agent": USER_AGENT})
                 r.raise_for_status()
-            
+
             ctype = r.headers.get("content-type", "")
-            
+
             # JSON
             if "application/json" in ctype:
                 text, extractor = json.dumps(r.json(), indent=2), "json"
             # HTML
             elif "text/html" in ctype or r.text[:256].lower().startswith(("<!doctype", "<html")):
-                doc = Document(r.text)
-                content = self._to_markdown(doc.summary()) if extractMode == "markdown" else _strip_tags(doc.summary())
-                text = f"# {doc.title()}\n\n{content}" if doc.title() else content
-                extractor = "readability"
+                title = self._extract_title(r.text)
+                content = self._extract_content(r.text)
+                if extractMode == "markdown":
+                    content = self._to_markdown(content)
+                else:
+                    content = _strip_tags(content)
+                text = f"# {title}\n\n{content}" if title else content
+                extractor = "simple_html"
             else:
                 text, extractor = r.text, "raw"
             
@@ -150,6 +152,45 @@ class WebFetchTool(Tool):
         except Exception as e:
             return json.dumps({"error": str(e), "url": url})
     
+    def _extract_title(self, html: str) -> str | None:
+        """Extract page title from HTML."""
+        title_match = re.search(r'<title[^>]*>([^<]+)</title>', html, re.I)
+        if title_match:
+            return _strip_tags(title_match[1]).strip()
+        return None
+
+    def _extract_content(self, html: str) -> str:
+        """Simple content extraction from HTML."""
+        # Remove script and style tags
+        html = re.sub(r'<script[\s\S]*?</script>', '', html, flags=re.I)
+        html = re.sub(r'<style[\s\S]*?</style>', '', html, flags=re.I)
+        html = re.sub(r'<nav[\s\S]*?</nav>', '', html, flags=re.I)
+        html = re.sub(r'<header[\s\S]*?</header>', '', html, flags=re.I)
+        html = re.sub(r'<footer[\s\S]*?</footer>', '', html, flags=re.I)
+
+        # Try to find main content areas
+        content_selectors = [
+            r'<main[^>]*>([\s\S]*?)</main>',
+            r'<article[^>]*>([\s\S]*?)</article>',
+            r'<div[^>]*class="[^"]*content[^"]*"[^>]*>([\s\S]*?)</div>',
+            r'<div[^>]*id="[^"]*content[^"]*"[^>]*>([\s\S]*?)</div>',
+            r'<body[^>]*>([\s\S]*?)</body>'
+        ]
+
+        for selector in content_selectors:
+            match = re.search(selector, html, re.I)
+            if match:
+                content = match[1]
+                if len(content) > 200:  # Ensure we have meaningful content
+                    return content
+
+        # Fallback: return body content
+        body_match = re.search(r'<body[^>]*>([\s\S]*?)</body>', html, re.I)
+        if body_match:
+            return body_match[1]
+
+        return html
+
     def _to_markdown(self, html: str) -> str:
         """Convert HTML to markdown."""
         # Convert links, headings, lists before stripping tags

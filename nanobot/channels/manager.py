@@ -18,7 +18,7 @@ class ChannelManager:
     Manages chat channels and coordinates message routing.
     
     Responsibilities:
-    - Initialize enabled channels (Telegram, WhatsApp, etc.)
+    - Initialize enabled channels (Telegram, Discord, etc.)
     - Start/stop channels
     - Route outbound messages
     """
@@ -47,17 +47,6 @@ class ChannelManager:
             except ImportError as e:
                 logger.warning(f"Telegram channel not available: {e}")
         
-        # WhatsApp channel
-        if self.config.channels.whatsapp.enabled:
-            try:
-                from nanobot.channels.whatsapp import WhatsAppChannel
-                self.channels["whatsapp"] = WhatsAppChannel(
-                    self.config.channels.whatsapp, self.bus
-                )
-                logger.info("WhatsApp channel enabled")
-            except ImportError as e:
-                logger.warning(f"WhatsApp channel not available: {e}")
-
         # Discord channel
         if self.config.channels.discord.enabled:
             try:
