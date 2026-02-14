@@ -207,10 +207,6 @@ If you suspect a security breach:
 ✅ **Secure Communication**
 - HTTPS for all external API calls
 - TLS for Telegram API
-<<<<<<< HEAD
-- WhatsApp bridge: localhost-only binding + optional token auth
-=======
->>>>>>> 删除对nodejs的依赖
 
 ## Known Limitations
 
