@@ -16,6 +16,7 @@ from nanobot.agent.tools.filesystem import ReadFileTool, WriteFileTool, EditFile
 from nanobot.agent.tools.shell import ExecTool
 from nanobot.agent.tools.web import WebSearchTool, WebFetchTool
 from nanobot.agent.tools.message import MessageTool
+from nanobot.agent.tools.image import SendImageTool, ReadImageTool
 from nanobot.agent.tools.spawn import SpawnTool
 from nanobot.agent.tools.cron import CronTool
 from nanobot.agent.memory import MemoryStore
@@ -107,7 +108,12 @@ class AgentLoop:
         # Message tool
         message_tool = MessageTool(send_callback=self.bus.publish_outbound)
         self.tools.register(message_tool)
-        
+
+        # Image tools
+        send_image_tool = SendImageTool(send_callback=self.bus.publish_outbound)
+        self.tools.register(send_image_tool)
+        self.tools.register(ReadImageTool())
+
         # Spawn tool (for subagents)
         spawn_tool = SpawnTool(manager=self.subagents)
         self.tools.register(spawn_tool)
@@ -121,6 +127,10 @@ class AgentLoop:
         if message_tool := self.tools.get("message"):
             if isinstance(message_tool, MessageTool):
                 message_tool.set_context(channel, chat_id)
+
+        if send_image_tool := self.tools.get("send_image"):
+            if isinstance(send_image_tool, SendImageTool):
+                send_image_tool.set_context(channel, chat_id)
 
         if spawn_tool := self.tools.get("spawn"):
             if isinstance(spawn_tool, SpawnTool):

@@ -1,0 +1,7 @@
+{"_type": "metadata", "created_at": "2026-02-13T04:52:28.354113", "updated_at": "2026-02-13T04:55:41.318844", "metadata": {}}
+{"role": "user", "content": "Hello", "timestamp": "2026-02-13T04:52:30.432905"}
+{"role": "assistant", "content": "Error calling LLM: litellm.RateLimitError: RateLimitError: MoonshotException - Your account org-674a11ba76b24798bd09be8ecca9dbde <ak-f89cggm41r4i11audmzi> is suspended due to insufficient balance, please recharge your account or check your plan and billing details", "timestamp": "2026-02-13T04:52:30.432914", "tools_used": null}
+{"role": "user", "content": "Hello", "timestamp": "2026-02-13T04:53:22.547024"}
+{"role": "assistant", "content": "Hello! \ud83d\udc4b I'm nanobot, your AI assistant. How can I help you today?", "timestamp": "2026-02-13T04:53:22.547032", "tools_used": null}
+{"role": "user", "content": "Hello", "timestamp": "2026-02-13T04:55:41.318834"}
+{"role": "assistant", "content": "Hello! \ud83d\udc4b Nice to see you again! I'm nanobot, your AI assistant. How can I help you today?", "timestamp": "2026-02-13T04:55:41.318842", "tools_used": null}

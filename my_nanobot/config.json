@@ -1,0 +1,25 @@
+{
+  "providers": {
+    "moonshot": {
+      "apiKey": "sk-uJ8fwU6cMctqNatKB9HxdohSfR9hmwVFg8rDpDBzeBIg5MdV",
+      "apiBase": "https://api.moonshot.cn/v1"
+    }
+  },
+  "agents": {
+    "defaults": {
+      "model": "kimi-k2.5",
+      "maxTokens": 8192,
+      "maxToolIterations": 20
+    }
+  },
+  "channels": {
+    "feishu": {
+      "enabled": true,
+      "appId": "cli_a86c38d4c27ad00d",
+      "appSecret": "YsOGAemtgSNDi3YyJcmVqd2A0J8J7zW1",
+      "encryptKey": "",
+      "verificationToken": "",
+      "allowFrom": []
+    }
+  }
+}

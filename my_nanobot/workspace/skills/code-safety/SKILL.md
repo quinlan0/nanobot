@@ -6,23 +6,6 @@ always: true
 
 # 代码安全规范
 
-## 图片和媒体处理
-
-Agent 现在支持主动发送图片和处理媒体文件：
-
-- **发送图片**：使用 `send_image` 工具发送图片文件
-- **读取图片信息**：使用 `read_image` 工具查看图片属性
-- **增强消息**：`message` 工具现在支持 `media` 参数发送多媒体内容
-
-**图片发送示例**：
-```python
-# 发送单张图片
-result = await send_image(image_path="/path/to/image.jpg", caption="项目截图")
-
-# 在消息中包含媒体
-result = await message(content="查看这个图表", media=["chart.png"])
-```
-
 ## 文件操作安全原则
 
 **绝对禁止的行为：**
