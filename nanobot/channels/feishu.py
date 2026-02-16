@@ -268,378 +268,64 @@ class FeishuChannel(BaseChannel):
             logger.error(f"Error sending Feishu message: {e}")
 
     async def _send_media_files(self, chat_id: str, receive_id_type: str, media_paths: list[str]) -> None:
-        """Send media files through Feishu."""
-        from pathlib import Path
-
-        logger.info(f"Feishu: Starting to send {len(media_paths)} media files to {chat_id}")
-
+        """Send media files through Feishu using SDK image upload API."""
         if not CreateImageRequest or not CreateImageRequestBody:
             logger.warning("Feishu image API not available - lark-oapi SDK not properly imported")
             return
 
         for media_path in media_paths:
-            logger.info(f"Feishu: Processing media file: {media_path}")
             try:
                 path = Path(media_path)
                 if not path.exists():
                     logger.error(f"Feishu: Media file not found: {media_path}")
                     continue
 
-                file_size = path.stat().st_size
-                logger.info(f"Feishu: File exists, size: {file_size} bytes, extension: {path.suffix}")
-
-                # Determine image type from file extension
                 image_type = self._get_image_type(path.suffix.lower())
-                logger.info(f"Feishu: Determined image type: {image_type}")
 
-                # Upload image first to get image_key
-                logger.info("Feishu: Starting image upload...")
+                # Step 1: Upload image to get image_key
+                with open(path, "rb") as f:
+                    upload_request = CreateImageRequest.builder() \
+                        .request_body(
+                            CreateImageRequestBody.builder()
+                            .image_type("message")
+                            .image(f)
+                            .build()
+                        ).build()
+                    upload_response = self._client.im.v1.image.create(upload_request)
 
-                # Read file into memory first (飞书API可能需要BytesIO而不是文件对象)
-                with open(path, 'rb') as f:
-                    image_data = f.read()
+                if not upload_response.success():
+                    logger.error(
+                        f"Feishu: Image upload failed: code={upload_response.code}, "
+                        f"msg={upload_response.msg}"
+                    )
+                    continue
 
-                logger.info(f"Feishu: Read {len(image_data)} bytes of image data")
+                image_key = upload_response.data.image_key
+                logger.info(f"Feishu: Image uploaded, image_key={image_key}")
 
-                # Use BytesIO for better compatibility
-                from io import BytesIO
-                image_stream = BytesIO(image_data)
+                # Step 2: Send image message
+                content = json.dumps({"image_key": image_key})
+                send_request = CreateMessageRequest.builder() \
+                    .receive_id_type(receive_id_type) \
+                    .request_body(
+                        CreateMessageRequestBody.builder()
+                        .receive_id(chat_id)
+                        .msg_type("image")
+                        .content(content)
+                        .build()
+                    ).build()
 
-                # Try a different approach: use only files field without request_body
-                # This is because the SDK serializes BytesIO to {} in JSON
-                upload_request = CreateImageRequest.builder().build()
-
-                # Set files field for multipart/form-data upload (飞书API需要)
-                upload_request.files = {
-                    'image': (path.name, image_stream, f'image/{image_type}')
-                }
-
-                logger.debug(f"Feishu: Upload request created for {path.name} ({len(image_data)} bytes, type: {image_type})")
-                logger.debug(f"Feishu: Request body: {upload_request.request_body}, files: {upload_request.files is not None}")
-
-                # Try direct HTTP request first (SDK seems to have issues)
-                logger.info("Feishu: Trying direct HTTP upload first...")
-                image_key = await self._upload_image_direct(path, image_data, image_type)
-
-                if image_key:
-                    logger.info(f"Feishu: Direct upload successful, image_key: {image_key}")
+                send_response = await self._client.im.v1.message.acreate(send_request)
+                if not send_response.success():
+                    logger.error(
+                        f"Feishu: Image send failed: code={send_response.code}, "
+                        f"msg={send_response.msg}"
+                    )
                 else:
-                    # Direct HTTP failed, try SDK as fallback
-                    logger.warning("Feishu: Direct HTTP upload failed, trying SDK...")
-                    upload_response = await self._client.im.v1.image.acreate(upload_request)
-
-                    logger.info(f"Feishu: SDK upload response received, success: {upload_response.success()}")
-
-                    if upload_response.success():
-                        image_key = upload_response.data.image_key
-                        logger.info(f"Feishu: Image uploaded successfully via SDK, image_key: {image_key}")
-                    else:
-                        logger.error(f"Feishu: SDK upload also failed: code={upload_response.code}, msg={upload_response.msg}")
-                        # As a last resort, send base64 encoded image in a text message
-                        logger.warning("Feishu: All upload methods failed, trying base64 encoding...")
-                        image_key = await self._send_image_as_base64(path, image_data, image_type, chat_id, receive_id_type)
-                        if image_key:
-                            logger.info("Feishu: Base64 image sent as text message")
-                            return  # Successfully sent, exit the loop
-                        else:
-                            logger.error("Feishu: All image sending methods failed")
-                            continue
-
-                # Send image message using the image_key
-                logger.info("Feishu: Sending image message...")
-                await self._send_image_message(chat_id, receive_id_type, image_key)
+                    logger.info(f"Feishu: Image sent to {chat_id}")
 
             except Exception as e:
                 logger.error(f"Feishu: Error sending media file {media_path}: {e}")
-                logger.error(f"Feishu: Exception type: {type(e)}")
-                import traceback
-                logger.error(f"Feishu: Full traceback: {traceback.format_exc()}")
-
-    async def _upload_image_direct(self, image_path: Path, image_data: bytes, image_type: str) -> str | None:
-        """Upload image using direct HTTP request as fallback."""
-        try:
-            # Use synchronous requests in thread pool for simplicity
-            import requests
-            from concurrent.futures import ThreadPoolExecutor
-            import asyncio
-
-            def upload_sync():
-                try:
-                    # Get tenant access token using synchronous call
-                    try:
-                        token_req = self._client.build_tenant_access_token_req()
-                        logger.debug("Feishu: Built tenant access token request")
-
-                        token_resp = self._client.request(token_req)  # Synchronous call
-                        logger.debug("Feishu: Token request completed")
-
-                        logger.info("Feishu: Token request sent, checking response...")
-                        logger.info(f"Feishu: Token response success: {token_resp.success()}")
-
-                        if not token_resp.success():
-                            logger.error(f"Feishu: Failed to get tenant access token: code={token_resp.code}, msg={token_resp.msg}")
-                            logger.error(f"Feishu: Token response data: {token_resp}")
-                            return None
-
-                        token = getattr(token_resp.data, 'tenant_access_token', None)
-                        logger.info(f"Feishu: Got tenant access token (length: {len(token) if token else 0})")
-
-                        if not token:
-                            logger.error("Feishu: Tenant access token is empty")
-                            logger.error(f"Feishu: Token response data attributes: {dir(token_resp.data) if token_resp.data else 'None'}")
-                            return None
-
-                    except Exception as token_error:
-                        logger.error(f"Feishu: Exception getting tenant token: {token_error}")
-                        import traceback
-                        logger.error(f"Feishu: Token traceback: {traceback.format_exc()}")
-                        return None
-
-                    # Prepare multipart form data using requests
-                    # Try different field names that Feishu might expect
-                    files = {
-                        'image': (image_path.name, image_data, f'image/{image_type}')
-                    }
-
-                    # Alternative: try without content_type, let requests auto-detect
-                    # files = {
-                    #     'image': (image_path.name, image_data)
-                    # }
-
-                    logger.debug(f"Feishu: Using multipart files: {list(files.keys())} with content_type: image/{image_type}")
-
-                    # Send request
-                    url = "https://open.feishu.cn/open-apis/im/v1/images"
-                    headers = {
-                        "Authorization": f"Bearer {token}",
-                        "User-Agent": "nanobot/1.0"
-                    }
-
-                    logger.info(f"Feishu: Sending direct HTTP POST to {url} with file {image_path.name}")
-                    logger.debug(f"Feishu: Request headers: {headers}")
-                    logger.debug(f"Feishu: Files: {list(files.keys())}")
-
-                    response = requests.post(url, files=files, headers=headers, timeout=30)
-                    logger.info(f"Feishu: Direct upload response status: {response.status_code}")
-                    logger.debug(f"Feishu: Response headers: {dict(response.headers)}")
-
-                    # Log response content for debugging
-                    response_text = response.text
-                    logger.debug(f"Feishu: Raw response: {response_text[:500]}...")
-
-                    if response.status_code == 200:
-                        try:
-                            result = response.json()
-                            logger.debug(f"Feishu: Parsed response: {result}")
-
-                            if result.get('code') == 0:
-                                image_key = result['data']['image_key']
-                                logger.info(f"Feishu: Direct upload successful, image_key: {image_key}")
-                                return image_key
-                            else:
-                                logger.error(f"Feishu: Direct upload API error: code={result.get('code')}, msg={result.get('msg')}")
-                        except Exception as json_error:
-                            logger.error(f"Feishu: Failed to parse JSON response: {json_error}")
-                            logger.error(f"Feishu: Raw response was: {response_text}")
-                    else:
-                        logger.error(f"Feishu: Direct upload HTTP error {response.status_code}: {response_text}")
-
-                    return None
-
-                except Exception as e:
-                    logger.error(f"Feishu: Direct upload sync failed: {e}")
-                    import traceback
-                    logger.error(f"Feishu: Direct upload sync traceback: {traceback.format_exc()}")
-                    return None
-
-            # Run synchronous upload in thread pool
-            loop = asyncio.get_event_loop()
-            with ThreadPoolExecutor() as executor:
-                result = await loop.run_in_executor(executor, upload_sync)
-
-            return result
-
-        except Exception as e:
-            logger.error(f"Feishu: Direct upload failed: {e}")
-            import traceback
-            logger.error(f"Feishu: Direct upload traceback: {traceback.format_exc()}")
-            return None
-
-    async def _send_image_as_base64(self, image_path: Path, image_data: bytes, image_type: str, chat_id: str, receive_id_type: str) -> bool:
-        """Send image as base64 encoded text message as last resort."""
-        try:
-            import base64
-
-            # Encode image data to base64
-            base64_data = base64.b64encode(image_data).decode('utf-8')
-            logger.info(f"Feishu: Encoded image to base64 (length: {len(base64_data)})")
-
-            # Create a data URL
-            data_url = f"data:image/{image_type};base64,{base64_data}"
-
-            # Send as rich text message with image
-            post_content = {
-                "zh_cn": {
-                    "title": f"Image: {image_path.name}",
-                    "content": [
-                        [{
-                            "tag": "img",
-                            "image_url": data_url,
-                            "alt": {
-                                "tag": "plain_text",
-                                "content": f"Image: {image_path.name}"
-                            }
-                        }],
-                        [{
-                            "tag": "text",
-                            "text": f"Image file: {image_path.name} ({len(image_data)} bytes)"
-                        }]
-                    ]
-                }
-            }
-
-            content = json.dumps(post_content, ensure_ascii=False)
-
-            request = CreateMessageRequest.builder() \
-                .receive_id_type(receive_id_type) \
-                .request_body(
-                    CreateMessageRequestBody.builder()
-                    .receive_id(chat_id)
-                    .msg_type("post")
-                    .content(content)
-                    .build()
-                ).build()
-
-            response = await self._client.im.v1.message.acreate(request)
-
-            if response.success():
-                logger.info("Feishu: Base64 image sent successfully as post message")
-                return True
-            else:
-                logger.error(f"Feishu: Failed to send base64 image: code={response.code}, msg={response.msg}")
-                return False
-
-        except Exception as e:
-            logger.error(f"Feishu: Base64 image sending failed: {e}")
-            import traceback
-            logger.error(f"Feishu: Base64 traceback: {traceback.format_exc()}")
-            return False
-
-    async def _send_image_message(self, chat_id: str, receive_id_type: str, image_key: str) -> None:
-        """Send an image message using image_key."""
-        logger.info(f"Feishu: Creating image message for chat_id={chat_id}, receive_id_type={receive_id_type}")
-
-        # Try multiple approaches for sending images
-
-        # Approach 1: Using "image" message type with image_key
-        logger.info("Feishu: Attempting approach 1 - image message type")
-        try:
-            image_content = {
-                "image_key": image_key
-            }
-            content = json.dumps(image_content, ensure_ascii=False)
-            logger.debug(f"Feishu: Image content JSON: {content}")
-
-            request = CreateMessageRequest.builder() \
-                .receive_id_type(receive_id_type) \
-                .request_body(
-                    CreateMessageRequestBody.builder()
-                    .receive_id(chat_id)
-                    .msg_type("image")
-                    .content(content)
-                    .build()
-                ).build()
-
-            response = await self._client.im.v1.message.acreate(request)
-
-            if response.success():
-                logger.info("Feishu: Image sent successfully using approach 1")
-                return
-            else:
-                logger.warning(f"Feishu: Approach 1 failed: code={response.code}, msg={response.msg}")
-
-        except Exception as e:
-            logger.warning(f"Feishu: Approach 1 exception: {e}")
-
-        # Approach 2: Using "post" message type with image element
-        logger.info("Feishu: Attempting approach 2 - post message type with image")
-        try:
-            post_content = {
-                "zh_cn": {
-                    "title": "Image",
-                    "content": [
-                        [{
-                            "tag": "img",
-                            "image_key": image_key,
-                            "width": 400,
-                            "height": 300
-                        }]
-                    ]
-                }
-            }
-            content = json.dumps(post_content, ensure_ascii=False)
-            logger.debug(f"Feishu: Post content JSON: {content}")
-
-            request = CreateMessageRequest.builder() \
-                .receive_id_type(receive_id_type) \
-                .request_body(
-                    CreateMessageRequestBody.builder()
-                    .receive_id(chat_id)
-                    .msg_type("post")
-                    .content(content)
-                    .build()
-                ).build()
-
-            response = await self._client.im.v1.message.acreate(request)
-
-            if response.success():
-                logger.info("Feishu: Image sent successfully using approach 2")
-                return
-            else:
-                logger.warning(f"Feishu: Approach 2 failed: code={response.code}, msg={response.msg}")
-
-        except Exception as e:
-            logger.warning(f"Feishu: Approach 2 exception: {e}")
-
-        # Approach 3: Using interactive card with image
-        logger.info("Feishu: Attempting approach 3 - interactive card with image")
-        try:
-            card_content = {
-                "config": {"wide_screen_mode": True},
-                "elements": [{
-                    "tag": "img",
-                    "img_key": image_key,
-                    "alt": {
-                        "tag": "plain_text",
-                        "content": "Image"
-                    }
-                }]
-            }
-            content = json.dumps(card_content, ensure_ascii=False)
-            logger.debug(f"Feishu: Card content JSON: {content}")
-
-            request = CreateMessageRequest.builder() \
-                .receive_id_type(receive_id_type) \
-                .request_body(
-                    CreateMessageRequestBody.builder()
-                    .receive_id(chat_id)
-                    .msg_type("interactive")
-                    .content(content)
-                    .build()
-                ).build()
-
-            response = await self._client.im.v1.message.acreate(request)
-
-            if response.success():
-                logger.info("Feishu: Image sent successfully using approach 3")
-                return
-            else:
-                logger.warning(f"Feishu: Approach 3 failed: code={response.code}, msg={response.msg}")
-
-        except Exception as e:
-            logger.warning(f"Feishu: Approach 3 exception: {e}")
-
-        logger.error("Feishu: All image sending approaches failed")
 
     async def _send_text_message(self, chat_id: str, receive_id_type: str, content: str) -> None:
         """Send a text message through Feishu."""
