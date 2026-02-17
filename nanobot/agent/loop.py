@@ -140,6 +140,50 @@ class AgentLoop:
             if isinstance(cron_tool, CronTool):
                 cron_tool.set_context(channel, chat_id)
 
+    def _get_max_message_bytes(self) -> int:
+        """Get the max total message size (bytes) for the current model."""
+        model_lower = (self.model or "").lower()
+        if "moonshot" in model_lower or "kimi" in model_lower:
+            return 3_500_000  # Moonshot 4 MB hard limit, leave headroom
+        return 10_000_000  # Conservative default for most providers
+
+    def _trim_messages_to_fit(self, messages: list[dict], max_bytes: int) -> list[dict]:
+        """Remove old history messages so the total payload stays under *max_bytes*.
+
+        Strategy:
+        1. Keep system prompt (index 0) unconditionally.
+        2. Remove the oldest non-tool messages (index 1 …) one by one.
+           Stop once we hit tool-related messages (current conversation turn).
+        3. Log every removal so the user can observe what happened.
+        """
+        def _size(m: dict) -> int:
+            return len(json.dumps(m, ensure_ascii=False).encode("utf-8"))
+
+        sizes = [_size(m) for m in messages]
+        total = sum(sizes)
+        if total <= max_bytes:
+            return messages
+
+        logger.warning(
+            f"Messages total {total / 1_000_000:.1f}MB exceeds "
+            f"{max_bytes / 1_000_000:.1f}MB limit, trimming history…"
+        )
+
+        result = list(messages)
+        result_sizes = list(sizes)
+
+        # Remove from index 1 forward (oldest history first)
+        while total > max_bytes and len(result) > 2:
+            candidate = result[1]
+            if candidate.get("role") == "tool" or candidate.get("tool_calls"):
+                break  # Reached current conversation, stop trimming
+            total -= result_sizes[1]
+            result.pop(1)
+            result_sizes.pop(1)
+
+        logger.info(f"Trimmed to {len(result)} messages ({total / 1_000_000:.1f}MB)")
+        return result
+
     async def _run_agent_loop(self, initial_messages: list[dict]) -> tuple[str | None, list[str]]:
         """
         Run the agent iteration loop.
@@ -154,10 +198,12 @@ class AgentLoop:
         iteration = 0
         final_content = None
         tools_used: list[str] = []
+        max_bytes = self._get_max_message_bytes()
 
         while iteration < self.max_iterations:
             iteration += 1
 
+            messages = self._trim_messages_to_fit(messages, max_bytes)
             response = await self.provider.chat(
                 messages=messages,
                 tools=self.tools.get_definitions(),
@@ -280,6 +326,7 @@ class AgentLoop:
             media=msg.media if msg.media else None,
             channel=msg.channel,
             chat_id=msg.chat_id,
+            model=self.model,
         )
         final_content, tools_used = await self._run_agent_loop(initial_messages)
 
@@ -328,6 +375,7 @@ class AgentLoop:
             current_message=msg.content,
             channel=origin_channel,
             chat_id=origin_chat_id,
+            model=self.model,
         )
         final_content, _ = await self._run_agent_loop(initial_messages)
 

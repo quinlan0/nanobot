@@ -6,8 +6,13 @@ import re
 import shutil
 from pathlib import Path
 
+from loguru import logger
+
 # Default builtin skills directory (relative to this file)
 BUILTIN_SKILLS_DIR = Path(__file__).parent.parent / "skills"
+
+# Max characters when reading a single skill file for prompt embedding.
+_MAX_SKILL_CHARS = 100_000
 
 
 class SkillsLoader:
@@ -58,7 +63,7 @@ class SkillsLoader:
     
     def load_skill(self, name: str) -> str | None:
         """
-        Load a skill by name.
+        Load a skill by name (with file-size guard).
         
         Args:
             name: Skill name (directory name).
@@ -66,17 +71,27 @@ class SkillsLoader:
         Returns:
             Skill content or None if not found.
         """
-        # Check workspace first
-        workspace_skill = self.workspace_skills / name / "SKILL.md"
-        if workspace_skill.exists():
-            return workspace_skill.read_text(encoding="utf-8")
-        
-        # Check built-in
+        # Check workspace first, then built-in
+        candidates = [self.workspace_skills / name / "SKILL.md"]
         if self.builtin_skills:
-            builtin_skill = self.builtin_skills / name / "SKILL.md"
-            if builtin_skill.exists():
-                return builtin_skill.read_text(encoding="utf-8")
-        
+            candidates.append(self.builtin_skills / name / "SKILL.md")
+
+        for skill_path in candidates:
+            if not skill_path.exists():
+                continue
+            file_size = skill_path.stat().st_size
+            if file_size > _MAX_SKILL_CHARS * 4:
+                logger.warning(f"Skill {name} skipped: file too large ({file_size} bytes)")
+                return f"[Skill {name}: skipped, file too large ({file_size} bytes)]"
+            content = skill_path.read_text(encoding="utf-8")
+            if len(content) > _MAX_SKILL_CHARS:
+                logger.warning(f"Skill {name} truncated: {len(content)} chars > {_MAX_SKILL_CHARS}")
+                content = (
+                    content[:_MAX_SKILL_CHARS]
+                    + f"\n\n[... skill {name} truncated, {len(content)} chars total ...]"
+                )
+            return content
+
         return None
     
     def load_skills_for_context(self, skill_names: list[str]) -> str:
