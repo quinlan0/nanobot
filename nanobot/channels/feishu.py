@@ -193,14 +193,24 @@ class FeishuChannel(BaseChannel):
             "rows": [{f"c{i}": r[i] if i < len(r) else "" for i in range(len(headers))} for r in rows],
         }
 
+    _MAX_CARD_TABLES = 3  # Feishu has a strict table-per-card limit
+
     def _build_card_elements(self, content: str) -> list[dict]:
         """Split content into div/markdown + table elements for Feishu card."""
-        elements, last_end = [], 0
+        elements, last_end, table_count = [], 0, 0
         for m in self._TABLE_RE.finditer(content):
             before = content[last_end:m.start()]
             if before.strip():
                 elements.extend(self._split_headings(before))
-            elements.append(self._parse_md_table(m.group(1)) or {"tag": "markdown", "content": m.group(1)})
+            if table_count < self._MAX_CARD_TABLES:
+                parsed = self._parse_md_table(m.group(1))
+                if parsed:
+                    elements.append(parsed)
+                    table_count += 1
+                else:
+                    elements.append({"tag": "markdown", "content": m.group(1)})
+            else:
+                elements.append({"tag": "markdown", "content": m.group(1)})
             last_end = m.end()
         remaining = content[last_end:]
         if remaining.strip():
@@ -328,8 +338,11 @@ class FeishuChannel(BaseChannel):
                 logger.error(f"Feishu: Error sending media file {media_path}: {e}")
 
     async def _send_text_message(self, chat_id: str, receive_id_type: str, content: str) -> None:
-        """Send a text message through Feishu."""
-        # Build card with markdown + table support
+        """Send a text message through Feishu.
+
+        Tries rich card first; falls back to plain text on card errors.
+        """
+        # Attempt 1: rich card with markdown + table support
         elements = self._build_card_elements(content)
         card = {
             "config": {"wide_screen_mode": True},
@@ -349,13 +362,35 @@ class FeishuChannel(BaseChannel):
 
         response = await self._client.im.v1.message.acreate(request)
 
-        if not response.success():
+        if response.success():
+            logger.debug(f"Feishu card message sent to {chat_id}")
+            return
+
+        logger.warning(
+            f"Feishu card failed (code={response.code}), falling back to plain text"
+        )
+
+        # Attempt 2: plain text fallback
+        text_content = json.dumps({"text": content}, ensure_ascii=False)
+        fallback_request = CreateMessageRequest.builder() \
+            .receive_id_type(receive_id_type) \
+            .request_body(
+                CreateMessageRequestBody.builder()
+                .receive_id(chat_id)
+                .msg_type("text")
+                .content(text_content)
+                .build()
+            ).build()
+
+        fallback_response = await self._client.im.v1.message.acreate(fallback_request)
+
+        if not fallback_response.success():
             logger.error(
-                f"Failed to send Feishu text message: code={response.code}, "
-                f"msg={response.msg}, log_id={response.get_log_id()}"
+                f"Feishu text fallback also failed: code={fallback_response.code}, "
+                f"msg={fallback_response.msg}"
             )
         else:
-            logger.debug(f"Feishu text message sent to {chat_id}")
+            logger.debug(f"Feishu plain text sent to {chat_id}")
 
     def _get_image_type(self, extension: str) -> str:
         """Get Feishu image type from file extension."""

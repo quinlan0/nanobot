@@ -453,8 +453,20 @@ Respond with ONLY valid JSON, no markdown fences."""
                 model=self.model,
             )
             text = (response.content or "").strip()
+
+            if not text:
+                logger.warning("Memory consolidation: LLM returned empty response, skipping")
+                return
+
+            # Strip markdown code fences if present
             if text.startswith("```"):
                 text = text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+
+            # Guard against LLM error messages leaking through
+            if text.startswith("Error"):
+                logger.warning(f"Memory consolidation: LLM returned error: {text[:200]}")
+                return
+
             result = json.loads(text)
 
             if entry := result.get("history_entry"):
@@ -468,6 +480,9 @@ Respond with ONLY valid JSON, no markdown fences."""
             else:
                 session.last_consolidated = len(session.messages) - keep_count
             logger.info(f"Memory consolidation done: {len(session.messages)} messages, last_consolidated={session.last_consolidated}")
+        except json.JSONDecodeError as e:
+            logger.error(f"Memory consolidation: invalid JSON from LLM: {e}")
+            logger.debug(f"Memory consolidation: raw response: {text[:500]}")
         except Exception as e:
             logger.error(f"Memory consolidation failed: {e}")
 
