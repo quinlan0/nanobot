@@ -156,9 +156,28 @@ class AgentDefaults(BaseModel):
     memory_window: int = 50
 
 
+class SpecialistConfig(BaseModel):
+    """Configuration for a specialist agent in multi-agent mode."""
+    name: str
+    description: str = ""
+    model: str | None = None
+    tools: list[str] = Field(default_factory=list)
+    system_prompt: str = ""
+    max_tokens: int | None = None
+    temperature: float | None = None
+
+
+class RouterConfig(BaseModel):
+    """Multi-agent router configuration."""
+    enabled: bool = False
+    model: str | None = None
+    specialists: list[SpecialistConfig] = Field(default_factory=list)
+
+
 class AgentsConfig(BaseModel):
     """Agent configuration."""
     defaults: AgentDefaults = Field(default_factory=AgentDefaults)
+    router: RouterConfig = Field(default_factory=RouterConfig)
 
 
 class ProviderConfig(BaseModel):

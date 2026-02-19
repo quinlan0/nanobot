@@ -106,6 +106,7 @@ class LiteLLMProvider(LLMProvider):
         model: str | None = None,
         max_tokens: int = 4096,
         temperature: float = 0.7,
+        extra_body: dict[str, Any] | None = None,
     ) -> LLMResponse:
         """
         Send a chat completion request via LiteLLM.
@@ -116,6 +117,8 @@ class LiteLLMProvider(LLMProvider):
             model: Model identifier (e.g., 'anthropic/claude-sonnet-4-5').
             max_tokens: Maximum tokens in response.
             temperature: Sampling temperature.
+            extra_body: Extra fields merged into the API request body
+                        (e.g. ``{"search_enabled": True}`` for Moonshot).
         
         Returns:
             LLMResponse with content and/or tool calls.
@@ -143,6 +146,12 @@ class LiteLLMProvider(LLMProvider):
         # Pass extra headers (e.g. APP-Code for AiHubMix)
         if self.extra_headers:
             kwargs["extra_headers"] = self.extra_headers
+
+        # Merge caller-supplied extra_body with any from model_overrides
+        override_body = kwargs.pop("extra_body", None)
+        merged_body = {**(override_body or {}), **(extra_body or {})}
+        if merged_body:
+            kwargs["extra_body"] = merged_body
         
         if tools:
             kwargs["tools"] = tools

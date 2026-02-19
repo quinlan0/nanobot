@@ -278,21 +278,27 @@ This file stores important information that should persist across sessions.
     skills_dir.mkdir(exist_ok=True)
 
 
-def _make_provider(config):
-    """Create LiteLLMProvider from config. Exits if no API key found."""
+def _make_provider(config, model: str | None = None):
+    """Create LiteLLMProvider from config. Exits if no API key found.
+
+    Args:
+        config: Root configuration.
+        model: Override model name (used in multi-agent mode when a specialist
+               agent uses a different model/provider than the default).
+    """
     from nanobot.providers.litellm_provider import LiteLLMProvider
-    p = config.get_provider()
-    model = config.agents.defaults.model
+    model = model or config.agents.defaults.model
+    p = config.get_provider(model)
     if not (p and p.api_key) and not model.startswith("bedrock/"):
         console.print("[red]Error: No API key configured.[/red]")
         console.print("Set one in ~/.nanobot/config.json under providers section")
         raise typer.Exit(1)
     return LiteLLMProvider(
         api_key=p.api_key if p else None,
-        api_base=config.get_api_base(),
+        api_base=config.get_api_base(model),
         default_model=model,
         extra_headers=p.extra_headers if p else None,
-        provider_name=config.get_provider_name(),
+        provider_name=config.get_provider_name(model),
     )
 
 
@@ -331,27 +337,82 @@ def gateway(
     cron_store_path = get_data_dir() / "cron" / "jobs.json"
     cron = CronService(cron_store_path)
     
-    # Create agent with cron service
-    agent = AgentLoop(
-        bus=bus,
-        provider=provider,
-        workspace=config.workspace_path,
-        model=config.agents.defaults.model,
-        temperature=config.agents.defaults.temperature,
-        max_tokens=config.agents.defaults.max_tokens,
-        max_iterations=config.agents.defaults.max_tool_iterations,
-        memory_window=config.agents.defaults.memory_window,
-        brave_api_key=config.tools.web.search.api_key or None,
-        exec_config=config.tools.exec,
-        cron_service=cron,
-        restrict_to_workspace=config.tools.restrict_to_workspace,
-        session_manager=session_manager,
-    )
-    
-    # Set cron callback (needs agent)
+    # ----------------------------------------------------------------
+    # Agent / Router creation
+    # ----------------------------------------------------------------
+    router_cfg = config.agents.router
+    use_router = router_cfg.enabled and len(router_cfg.specialists) > 0
+
+    if use_router:
+        from nanobot.agent.router import RouterLoop
+
+        agents: dict[str, AgentLoop] = {}
+        for spec in router_cfg.specialists:
+            spec_model = spec.model or config.agents.defaults.model
+            spec_provider = (
+                _make_provider(config, spec_model) if spec.model else provider
+            )
+            agent_loop = AgentLoop(
+                bus=bus,
+                provider=spec_provider,
+                workspace=config.workspace_path,
+                model=spec_model,
+                temperature=(
+                    spec.temperature
+                    if spec.temperature is not None
+                    else config.agents.defaults.temperature
+                ),
+                max_tokens=spec.max_tokens or config.agents.defaults.max_tokens,
+                max_iterations=config.agents.defaults.max_tool_iterations,
+                memory_window=config.agents.defaults.memory_window,
+                brave_api_key=config.tools.web.search.api_key or None,
+                exec_config=config.tools.exec,
+                cron_service=cron,
+                restrict_to_workspace=config.tools.restrict_to_workspace,
+                session_manager=session_manager,
+                specialist_name=spec.name,
+                specialist_description=spec.description,
+                specialist_prompt=spec.system_prompt,
+                tool_filter=spec.tools if spec.tools else None,
+            )
+            agents[spec.name] = agent_loop
+
+        router = RouterLoop(
+            bus=bus,
+            provider=provider,
+            agents=agents,
+            model=router_cfg.model or config.agents.defaults.model,
+        )
+        default_agent = agents[next(iter(agents))]
+        runner = router
+        console.print(
+            f"[green]✓[/green] Multi-agent router enabled — "
+            f"agents: {', '.join(agents.keys())}"
+        )
+    else:
+        default_agent = AgentLoop(
+            bus=bus,
+            provider=provider,
+            workspace=config.workspace_path,
+            model=config.agents.defaults.model,
+            temperature=config.agents.defaults.temperature,
+            max_tokens=config.agents.defaults.max_tokens,
+            max_iterations=config.agents.defaults.max_tool_iterations,
+            memory_window=config.agents.defaults.memory_window,
+            brave_api_key=config.tools.web.search.api_key or None,
+            exec_config=config.tools.exec,
+            cron_service=cron,
+            restrict_to_workspace=config.tools.restrict_to_workspace,
+            session_manager=session_manager,
+        )
+        runner = default_agent
+
+    # ----------------------------------------------------------------
+    # Cron callback (uses the default / first agent for direct calls)
+    # ----------------------------------------------------------------
     async def on_cron_job(job: CronJob) -> str | None:
         """Execute a cron job through the agent."""
-        response = await agent.process_direct(
+        response = await default_agent.process_direct(
             job.payload.message,
             session_key=f"cron:{job.id}",
             channel=job.payload.channel or "cli",
@@ -370,7 +431,7 @@ def gateway(
     # Create heartbeat service
     async def on_heartbeat(prompt: str) -> str:
         """Execute heartbeat through the agent."""
-        return await agent.process_direct(prompt, session_key="heartbeat")
+        return await default_agent.process_direct(prompt, session_key="heartbeat")
     
     heartbeat = HeartbeatService(
         workspace=config.workspace_path,
@@ -398,14 +459,14 @@ def gateway(
             await cron.start()
             await heartbeat.start()
             await asyncio.gather(
-                agent.run(),
+                runner.run(),
                 channels.start_all(),
             )
         except KeyboardInterrupt:
             console.print("\nShutting down...")
             heartbeat.stop()
             cron.stop()
-            agent.stop()
+            runner.stop()
             await channels.stop_all()
     
     asyncio.run(run())

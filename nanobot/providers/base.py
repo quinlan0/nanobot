@@ -48,6 +48,7 @@ class LLMProvider(ABC):
         model: str | None = None,
         max_tokens: int = 4096,
         temperature: float = 0.7,
+        extra_body: dict[str, Any] | None = None,
     ) -> LLMResponse:
         """
         Send a chat completion request.
@@ -58,6 +59,8 @@ class LLMProvider(ABC):
             model: Model identifier (provider-specific).
             max_tokens: Maximum tokens in response.
             temperature: Sampling temperature.
+            extra_body: Extra fields merged into the API request body
+                        (e.g. ``{"search_enabled": True}`` for Moonshot).
         
         Returns:
             LLMResponse with content and/or tool calls.

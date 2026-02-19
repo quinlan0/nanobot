@@ -11,6 +11,7 @@ from nanobot.bus.events import InboundMessage, OutboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.providers.base import LLMProvider
 from nanobot.agent.context import ContextBuilder
+from nanobot.agent.tools.base import Tool
 from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.agent.tools.filesystem import ReadFileTool, WriteFileTool, EditFileTool, ListDirTool
 from nanobot.agent.tools.shell import ExecTool
@@ -51,6 +52,11 @@ class AgentLoop:
         cron_service: "CronService | None" = None,
         restrict_to_workspace: bool = False,
         session_manager: SessionManager | None = None,
+        # Multi-agent specialist parameters
+        specialist_name: str | None = None,
+        specialist_description: str = "",
+        specialist_prompt: str = "",
+        tool_filter: list[str] | None = None,
     ):
         from nanobot.config.schema import ExecToolConfig
         from nanobot.cron.service import CronService
@@ -66,6 +72,11 @@ class AgentLoop:
         self.exec_config = exec_config or ExecToolConfig()
         self.cron_service = cron_service
         self.restrict_to_workspace = restrict_to_workspace
+
+        self.specialist_name = specialist_name
+        self.specialist_description = specialist_description
+        self.specialist_prompt = specialist_prompt
+        self.tool_filter = tool_filter
 
         self.context = ContextBuilder(workspace)
         self.sessions = session_manager or SessionManager(workspace)
@@ -86,41 +97,36 @@ class AgentLoop:
         self._register_default_tools()
     
     def _register_default_tools(self) -> None:
-        """Register the default set of tools."""
-        # File tools (restrict to workspace if configured)
+        """Register the default set of tools.
+
+        When ``self.tool_filter`` is set (multi-agent mode), only tools whose
+        name appears in the filter list will be registered.
+        """
         allowed_dir = self.workspace if self.restrict_to_workspace else None
-        self.tools.register(ReadFileTool(allowed_dir=allowed_dir))
-        self.tools.register(WriteFileTool(allowed_dir=allowed_dir))
-        self.tools.register(EditFileTool(allowed_dir=allowed_dir))
-        self.tools.register(ListDirTool(allowed_dir=allowed_dir))
-        
-        # Shell tool
-        self.tools.register(ExecTool(
-            working_dir=str(self.workspace),
-            timeout=self.exec_config.timeout,
-            restrict_to_workspace=self.restrict_to_workspace,
-        ))
-        
-        # Web tools
-        self.tools.register(WebSearchTool(api_key=self.brave_api_key))
-        self.tools.register(WebFetchTool())
-        
-        # Message tool
-        message_tool = MessageTool(send_callback=self.bus.publish_outbound)
-        self.tools.register(message_tool)
 
-        # Image tools
-        send_image_tool = SendImageTool(send_callback=self.bus.publish_outbound)
-        self.tools.register(send_image_tool)
-        self.tools.register(ReadImageTool())
-
-        # Spawn tool (for subagents)
-        spawn_tool = SpawnTool(manager=self.subagents)
-        self.tools.register(spawn_tool)
-        
-        # Cron tool (for scheduling)
+        all_tools: list[Tool] = [
+            ReadFileTool(allowed_dir=allowed_dir),
+            WriteFileTool(allowed_dir=allowed_dir),
+            EditFileTool(allowed_dir=allowed_dir),
+            ListDirTool(allowed_dir=allowed_dir),
+            ExecTool(
+                working_dir=str(self.workspace),
+                timeout=self.exec_config.timeout,
+                restrict_to_workspace=self.restrict_to_workspace,
+            ),
+            WebSearchTool(api_key=self.brave_api_key),
+            WebFetchTool(),
+            MessageTool(send_callback=self.bus.publish_outbound),
+            SendImageTool(send_callback=self.bus.publish_outbound),
+            ReadImageTool(),
+            SpawnTool(manager=self.subagents),
+        ]
         if self.cron_service:
-            self.tools.register(CronTool(self.cron_service))
+            all_tools.append(CronTool(self.cron_service))
+
+        for tool in all_tools:
+            if self.tool_filter is None or tool.name in self.tool_filter:
+                self.tools.register(tool)
     
     def _set_tool_context(self, channel: str, chat_id: str) -> None:
         """Update context for all tools that need routing info."""
@@ -184,6 +190,13 @@ class AgentLoop:
         logger.info(f"Trimmed to {len(result)} messages ({total / 1_000_000:.1f}MB)")
         return result
 
+    def _get_extra_body(self) -> dict | None:
+        """Build extra_body for the current model (e.g. Kimi web search)."""
+        model_lower = (self.model or "").lower()
+        if "moonshot" in model_lower or "kimi" in model_lower:
+            return {"search_enabled": True}
+        return None
+
     async def _run_agent_loop(self, initial_messages: list[dict]) -> tuple[str | None, list[str]]:
         """
         Run the agent iteration loop.
@@ -197,8 +210,10 @@ class AgentLoop:
         messages = initial_messages
         iteration = 0
         final_content = None
+        last_text: str | None = None  # Track last non-empty text from LLM
         tools_used: list[str] = []
         max_bytes = self._get_max_message_bytes()
+        extra_body = self._get_extra_body()
 
         while iteration < self.max_iterations:
             iteration += 1
@@ -210,7 +225,12 @@ class AgentLoop:
                 model=self.model,
                 temperature=self.temperature,
                 max_tokens=self.max_tokens,
+                extra_body=extra_body,
             )
+
+            # Remember the latest non-empty text the LLM produced
+            if response.content:
+                last_text = response.content
 
             if response.has_tool_calls:
                 tool_call_dicts = [
@@ -241,6 +261,14 @@ class AgentLoop:
             else:
                 final_content = response.content
                 break
+
+        # Fallback: use the last text the LLM ever produced during iterations
+        if final_content is None and last_text:
+            logger.info(f"Agent loop ended without final response, using last LLM text")
+            final_content = last_text
+
+        if iteration >= self.max_iterations and final_content is None:
+            logger.warning(f"Agent loop hit max iterations ({self.max_iterations}) without a final response")
 
         return final_content, tools_used
 
@@ -328,6 +356,10 @@ class AgentLoop:
             chat_id=msg.chat_id,
             model=self.model,
         )
+        if self.specialist_prompt and initial_messages:
+            initial_messages[0]["content"] += (
+                f"\n\n## Your Specialist Role\n{self.specialist_prompt}"
+            )
         final_content, tools_used = await self._run_agent_loop(initial_messages)
 
         if final_content is None:
