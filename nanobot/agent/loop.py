@@ -190,12 +190,24 @@ class AgentLoop:
         logger.info(f"Trimmed to {len(result)} messages ({total / 1_000_000:.1f}MB)")
         return result
 
-    def _get_extra_body(self) -> dict | None:
-        """Build extra_body for the current model (e.g. Kimi web search)."""
+    # Kimi K2.5 built-in web search tool (Moonshot-specific extension)
+    _KIMI_WEB_SEARCH_TOOL = {
+            "type": "builtin_function",  # <-- 使用 builtin_function 声明 $web_search 函数，请在每次请求都完整地带上 tools 声明
+            "function": {
+                "name": "$web_search",
+                },
+            }
+
+    def _is_kimi_model(self) -> bool:
         model_lower = (self.model or "").lower()
-        if "moonshot" in model_lower or "kimi" in model_lower:
-            return {"search_enabled": True}
-        return None
+        return "moonshot" in model_lower or "kimi" in model_lower
+
+    def _build_tools(self) -> list[dict]:
+        """Build tools list, appending Kimi $web_search if applicable."""
+        tools = self.tools.get_definitions()
+        if self._is_kimi_model():
+            tools = tools + [self._KIMI_WEB_SEARCH_TOOL]
+        return tools
 
     async def _run_agent_loop(self, initial_messages: list[dict]) -> tuple[str | None, list[str]]:
         """
@@ -213,7 +225,7 @@ class AgentLoop:
         last_text: str | None = None  # Track last non-empty text from LLM
         tools_used: list[str] = []
         max_bytes = self._get_max_message_bytes()
-        extra_body = self._get_extra_body()
+        tools = self._build_tools()
 
         while iteration < self.max_iterations:
             iteration += 1
@@ -221,11 +233,10 @@ class AgentLoop:
             messages = self._trim_messages_to_fit(messages, max_bytes)
             response = await self.provider.chat(
                 messages=messages,
-                tools=self.tools.get_definitions(),
+                tools=tools,
                 model=self.model,
                 temperature=self.temperature,
                 max_tokens=self.max_tokens,
-                extra_body=extra_body,
             )
 
             # Remember the latest non-empty text the LLM produced
@@ -236,7 +247,10 @@ class AgentLoop:
                 tool_call_dicts = [
                     {
                         "id": tc.id,
-                        "type": "function",
+                        "type": (
+                            "builtin_function" if tc.name.startswith("$")
+                            else "function"
+                        ),
                         "function": {
                             "name": tc.name,
                             "arguments": json.dumps(tc.arguments)
@@ -244,15 +258,29 @@ class AgentLoop:
                     }
                     for tc in response.tool_calls
                 ]
+
+                # Kimi K2.5 thinking mode requires reasoning_content on
+                # assistant messages; use a space as placeholder when absent.
+                rc = response.reasoning_content
+                if self._is_kimi_model() and not rc:
+                    rc = " "
                 messages = self.context.add_assistant_message(
                     messages, response.content, tool_call_dicts,
-                    reasoning_content=response.reasoning_content,
+                    reasoning_content=rc,
                 )
 
                 for tool_call in response.tool_calls:
                     tools_used.append(tool_call.name)
                     args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
                     logger.info(f"Tool call: {tool_call.name}({args_str[:200]})")
+                    # Kimi builtin tools (e.g. $web_search): echo arguments
+                    # back as tool result — the server already ran the search.
+                    if tool_call.name.startswith("$"):
+                        logger.info(f"Kimi builtin tool: {tool_call.name}")
+                        messages = self.context.add_tool_result(
+                            messages, tool_call.id, tool_call.name, args_str
+                        )
+                        continue
                     result = await self.tools.execute(tool_call.name, tool_call.arguments)
                     messages = self.context.add_tool_result(
                         messages, tool_call.id, tool_call.name, result

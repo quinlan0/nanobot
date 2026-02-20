@@ -150,14 +150,34 @@ class LiteLLMProvider(LLMProvider):
         # Merge caller-supplied extra_body with any from model_overrides
         override_body = kwargs.pop("extra_body", None)
         merged_body = {**(override_body or {}), **(extra_body or {})}
+
+        # Moonshot builtin tools (e.g. $web_search) use "type":"builtin_function"
+        # which LiteLLM strips. Route ALL tools through extra_body for Moonshot
+        # so they reach the API untouched.
+        has_builtin = tools and any(
+            t.get("type") == "builtin_function" for t in tools
+        )
+        if has_builtin:
+            merged_body["tools"] = tools
+            merged_body["tool_choice"] = "auto"
+        elif tools:
+            kwargs["tools"] = tools
+            kwargs["tool_choice"] = "auto"
+
         if merged_body:
             kwargs["extra_body"] = merged_body
         
-        if tools:
-            kwargs["tools"] = tools
-            kwargs["tool_choice"] = "auto"
-        
         try:
+            from loguru import logger
+            log_kwargs = {k: v for k, v in kwargs.items() if k not in ("messages", "extra_body")}
+            log_kwargs["messages_count"] = len(kwargs.get("messages", []))
+            all_tools = kwargs.get("tools") or (kwargs.get("extra_body") or {}).get("tools") or []
+            log_kwargs["tools_count"] = len(all_tools)
+            log_kwargs["tool_names"] = [
+                t.get("function", {}).get("name", "?") for t in all_tools
+            ]
+            log_kwargs["tools_via"] = "extra_body" if has_builtin else "kwargs"
+            logger.info(f"LiteLLM acompletion: {log_kwargs}")
             response = await acompletion(**kwargs)
             return self._parse_response(response)
         except Exception as e:
