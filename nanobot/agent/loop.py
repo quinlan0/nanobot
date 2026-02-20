@@ -57,6 +57,9 @@ class AgentLoop:
         specialist_description: str = "",
         specialist_prompt: str = "",
         tool_filter: list[str] | None = None,
+        # Model switching support
+        provider_factory: "Callable[[str], LLMProvider] | None" = None,
+        model_aliases: dict[str, str] | None = None,
     ):
         from nanobot.config.schema import ExecToolConfig
         from nanobot.cron.service import CronService
@@ -77,6 +80,9 @@ class AgentLoop:
         self.specialist_description = specialist_description
         self.specialist_prompt = specialist_prompt
         self.tool_filter = tool_filter
+
+        self._provider_factory = provider_factory
+        self._model_aliases = model_aliases or {}
 
         self.context = ContextBuilder(workspace)
         self.sessions = session_manager or SessionManager(workspace)
@@ -146,6 +152,48 @@ class AgentLoop:
             if isinstance(cron_tool, CronTool):
                 cron_tool.set_context(channel, chat_id)
 
+    # ------------------------------------------------------------------
+    # Model switching (/model command)
+    # ------------------------------------------------------------------
+
+    def _resolve_model_alias(self, name: str) -> str:
+        """Resolve a model alias to its full model name."""
+        return self._model_aliases.get(name, name)
+
+    def switch_model(self, model_name: str) -> str:
+        """Switch the active model (and provider if needed).
+
+        Returns a human-readable status message.
+        """
+        full_model = self._resolve_model_alias(model_name)
+
+        if self._provider_factory:
+            try:
+                new_provider = self._provider_factory(full_model)
+                self.provider = new_provider
+            except Exception as e:
+                return f"Failed to switch model: {e}"
+
+        self.model = full_model
+        logger.info(f"Model switched to: {self.model}")
+        return f"Model switched to **{self.model}**"
+
+    def _handle_model_command(self, cmd: str) -> str:
+        """Handle ``/model`` and ``/model <name>`` commands."""
+        parts = cmd.split(maxsplit=1)
+        if len(parts) == 1:
+            lines = [f"Current model: **{self.model}**"]
+            if self._model_aliases:
+                lines.append("\nAvailable aliases:")
+                for alias, full in sorted(self._model_aliases.items()):
+                    marker = " ← current" if full == self.model else ""
+                    lines.append(f"  • `{alias}` → {full}{marker}")
+                lines.append(f"\nSwitch: /model <alias or full name>")
+            return "\n".join(lines)
+
+        target = parts[1].strip()
+        return self.switch_model(target)
+
     def _get_max_message_bytes(self) -> int:
         """Get the max total message size (bytes) for the current model."""
         model_lower = (self.model or "").lower()
@@ -192,7 +240,7 @@ class AgentLoop:
 
     # Kimi K2.5 built-in web search tool (Moonshot-specific extension)
     _KIMI_WEB_SEARCH_TOOL = {
-            "type": "builtin_function",  # <-- 使用 builtin_function 声明 $web_search 函数，请在每次请求都完整地带上 tools 声明
+            "type": "builtin_function",
             "function": {
                 "name": "$web_search",
                 },
@@ -202,12 +250,40 @@ class AgentLoop:
         model_lower = (self.model or "").lower()
         return "moonshot" in model_lower or "kimi" in model_lower
 
+    def _is_doubao_model(self) -> bool:
+        model_lower = (self.model or "").lower()
+        return "doubao" in model_lower
+
+    def _is_qwen_model(self) -> bool:
+        model_lower = (self.model or "").lower()
+        return "qwen" in model_lower or "dashscope" in model_lower
+
+    def _has_builtin_search(self) -> bool:
+        """True if the current model has built-in web search (via extra_body)."""
+        return self._is_doubao_model() or self._is_qwen_model()
+
     def _build_tools(self) -> list[dict]:
-        """Build tools list, appending Kimi $web_search if applicable."""
+        """Build tools list, appending provider-specific search tools.
+
+        When the model provides built-in web search (Doubao, Qwen), our
+        internal ``web_search`` function tool is removed to avoid the
+        model calling it instead of its own search capability.
+        """
         tools = self.tools.get_definitions()
+        if self._has_builtin_search():
+            tools = [t for t in tools
+                     if t.get("function", {}).get("name") != "web_search"]
         if self._is_kimi_model():
             tools = tools + [self._KIMI_WEB_SEARCH_TOOL]
         return tools
+
+    def _build_extra_body(self) -> dict | None:
+        """Build extra_body for provider-specific extensions."""
+        if self._is_doubao_model():
+            return {"web_search": {"enable": True, "search_mode": "auto"}}
+        if self._is_qwen_model():
+            return {"enable_search": True}
+        return None
 
     async def _run_agent_loop(self, initial_messages: list[dict]) -> tuple[str | None, list[str]]:
         """
@@ -226,6 +302,7 @@ class AgentLoop:
         tools_used: list[str] = []
         max_bytes = self._get_max_message_bytes()
         tools = self._build_tools()
+        extra_body = self._build_extra_body()
 
         while iteration < self.max_iterations:
             iteration += 1
@@ -237,6 +314,7 @@ class AgentLoop:
                 model=self.model,
                 temperature=self.temperature,
                 max_tokens=self.max_tokens,
+                extra_body=extra_body,
             )
 
             # Remember the latest non-empty text the LLM produced
@@ -370,7 +448,10 @@ class AgentLoop:
                                   content="New session started. Memory consolidation in progress.")
         if cmd == "/help":
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id,
-                                  content="🐈 nanobot commands:\n/new — Start a new conversation\n/help — Show available commands")
+                                  content="🐈 nanobot commands:\n/new — Start a new conversation\n/model — List or switch models\n/help — Show available commands")
+        if cmd.startswith("/model"):
+            result = self._handle_model_command(cmd)
+            return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=result)
         
         if len(session.messages) > self.memory_window:
             asyncio.create_task(self._consolidate_memory(session))

@@ -231,6 +231,25 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         model_overrides=(),
     ),
 
+    # Doubao (Volcengine Ark): OpenAI-compatible, uses "openai/" prefix.
+    # The Doubao API lives at ark.cn-beijing.volces.com/api/v3.
+    ProviderSpec(
+        name="doubao",
+        keywords=("doubao",),
+        env_key="VOLCENGINE_API_KEY",
+        display_name="Doubao",
+        litellm_prefix="openai",            # OpenAI-compatible endpoint
+        skip_prefixes=("openai/",),
+        env_extras=(),
+        is_gateway=False,
+        is_local=False,
+        detect_by_key_prefix="",
+        detect_by_base_keyword="",
+        default_api_base="https://ark.cn-beijing.volces.com/api/v3",
+        strip_model_prefix=False,
+        model_overrides=(),
+    ),
+
     # Moonshot: Kimi models, needs "moonshot/" prefix.
     # LiteLLM requires MOONSHOT_API_BASE env var to find the endpoint.
     # Kimi K2.5 API enforces temperature >= 1.0.

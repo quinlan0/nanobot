@@ -151,13 +151,13 @@ class LiteLLMProvider(LLMProvider):
         override_body = kwargs.pop("extra_body", None)
         merged_body = {**(override_body or {}), **(extra_body or {})}
 
-        # Moonshot builtin tools (e.g. $web_search) use "type":"builtin_function"
-        # which LiteLLM strips. Route ALL tools through extra_body for Moonshot
-        # so they reach the API untouched.
-        has_builtin = tools and any(
-            t.get("type") == "builtin_function" for t in tools
+        # Non-standard tool types (e.g. Moonshot "builtin_function",
+        # Doubao "web_search") get stripped by LiteLLM.  Route ALL tools
+        # through extra_body so they reach the API untouched.
+        has_nonstandard = tools and any(
+            t.get("type") not in ("function", None) for t in tools
         )
-        if has_builtin:
+        if has_nonstandard:
             merged_body["tools"] = tools
             merged_body["tool_choice"] = "auto"
         elif tools:
@@ -169,14 +169,18 @@ class LiteLLMProvider(LLMProvider):
         
         try:
             from loguru import logger
-            log_kwargs = {k: v for k, v in kwargs.items() if k not in ("messages", "extra_body")}
+            log_kwargs = {k: v for k, v in kwargs.items() if k not in ("messages",)}
             log_kwargs["messages_count"] = len(kwargs.get("messages", []))
-            all_tools = kwargs.get("tools") or (kwargs.get("extra_body") or {}).get("tools") or []
+            eb = kwargs.get("extra_body") or {}
+            all_tools = kwargs.get("tools") or eb.get("tools") or []
             log_kwargs["tools_count"] = len(all_tools)
             log_kwargs["tool_names"] = [
                 t.get("function", {}).get("name", "?") for t in all_tools
             ]
-            log_kwargs["tools_via"] = "extra_body" if has_builtin else "kwargs"
+            log_kwargs["tools_via"] = "extra_body" if has_nonstandard else "kwargs"
+            extra_body_keys = {k: v for k, v in eb.items() if k != "tools"}
+            if extra_body_keys:
+                log_kwargs["extra_body_params"] = extra_body_keys
             logger.info(f"LiteLLM acompletion: {log_kwargs}")
             response = await acompletion(**kwargs)
             return self._parse_response(response)

@@ -154,6 +154,7 @@ class AgentDefaults(BaseModel):
     temperature: float = 0.7
     max_tool_iterations: int = 20
     memory_window: int = 50
+    model_aliases: dict[str, str] = Field(default_factory=dict)
 
 
 class SpecialistConfig(BaseModel):
@@ -199,6 +200,7 @@ class ProvidersConfig(BaseModel):
     dashscope: ProviderConfig = Field(default_factory=ProviderConfig)  # 阿里云通义千问
     vllm: ProviderConfig = Field(default_factory=ProviderConfig)
     gemini: ProviderConfig = Field(default_factory=ProviderConfig)
+    doubao: ProviderConfig = Field(default_factory=ProviderConfig)  # 豆包/火山方舟
     moonshot: ProviderConfig = Field(default_factory=ProviderConfig)
     minimax: ProviderConfig = Field(default_factory=ProviderConfig)
     aihubmix: ProviderConfig = Field(default_factory=ProviderConfig)  # AiHubMix API gateway

@@ -3,13 +3,50 @@
     "moonshot": {
       "apiKey": "sk-uJ8fwU6cMctqNatKB9HxdohSfR9hmwVFg8rDpDBzeBIg5MdV",
       "apiBase": "https://api.moonshot.cn/v1"
+    },
+    "doubao": {
+      "apiKey": "1a6bbc97-0185-4557-a9dc-800981d602f1",
+      "apiBase": "https://ark.cn-beijing.volces.com/api/v3"
+    },
+    "dashscope": {
+      "apiKey": "sk-5302c716360f47ad9dedfd3a28b350d0",
+      "apiBase": "https://dashscope.aliyuncs.com/compatible-mode/v1"
     }
   },
   "agents": {
     "defaults": {
-      "model": "kimi-k2.5",
+      "model": "doubao-seed-2-0-pro-260215",
       "maxTokens": 8192,
-      "maxToolIterations": 20
+      "maxToolIterations": 20,
+      "modelAliases": {
+        "kimi": "kimi-k2.5",
+        "doubao": "doubao-seed-2-0-pro-260215",
+        "qwen": "qwen3.5-plus-2026-02-15"
+      }
+    },
+    "router": {
+      "enabled": true,
+      "model": "doubao-seed-2-0-pro-260215",
+      "specialists": [
+        {
+          "name": "coder",
+          "description": "编码、文件操作、脚本编写、系统管理",
+          "tools": ["read_file", "write_file", "edit_file", "list_dir", "exec", "read_image"],
+          "systemPrompt": "你是一个专注于编码和系统管理的助手。优先使用工具完成任务。"
+        },
+        {
+          "name": "searcher",
+          "description": "信息检索、网页搜索、知识查询",
+          "tools": ["web_search", "web_fetch", "read_file", "list_dir"],
+          "systemPrompt": "你是一个搜索和信息检索助手。善于从网上找到准确信息。"
+        },
+        {
+          "name": "chat",
+          "description": "日常对话、问答、翻译、创意写作",
+          "tools": ["message", "send_image", "spawn", "cron"],
+          "systemPrompt": "你是一个友好的对话助手，擅长聊天和创意写作。"
+        }
+      ]
     }
   },
   "channels": {

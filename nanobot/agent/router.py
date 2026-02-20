@@ -155,6 +155,28 @@ class RouterLoop:
         logger.info("Router stopping")
 
     # ------------------------------------------------------------------
+    # Model switching
+    # ------------------------------------------------------------------
+
+    def _handle_model_command(self, cmd: str) -> str:
+        """Handle ``/model`` and ``/model <name>`` for all agents."""
+        parts = cmd.split(maxsplit=1)
+        if len(parts) == 1:
+            first_agent = next(iter(self.agents.values()))
+            return first_agent._handle_model_command(cmd)
+
+        target = parts[1].strip()
+        results: list[str] = []
+        for name, agent in self.agents.items():
+            msg = agent.switch_model(target)
+            results.append(f"  • {name}: {msg}")
+
+        self_model = next(iter(self.agents.values()))._resolve_model_alias(target)
+        self.model = self_model
+
+        return f"All agents switched:\n" + "\n".join(results)
+
+    # ------------------------------------------------------------------
     # Dispatch
     # ------------------------------------------------------------------
 
@@ -179,6 +201,15 @@ class RouterLoop:
                 content="All agent sessions cleared. Starting fresh.",
             )
 
+        # /model — switch model for all agents
+        if cmd.startswith("/model"):
+            result = self._handle_model_command(cmd)
+            return OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content=result,
+            )
+
         # /help
         if cmd == "/help":
             lines = [f"  • {n}: {a.specialist_description}" for n, a in self.agents.items()]
@@ -187,7 +218,7 @@ class RouterLoop:
                 chat_id=msg.chat_id,
                 content=(
                     "🐈 nanobot (multi-agent mode)\n\n"
-                    "Commands:\n  /new — Clear all sessions\n  /help — This help\n\n"
+                    "Commands:\n  /new — Clear all sessions\n  /model — List or switch models\n  /help — This help\n\n"
                     f"Specialist agents:\n" + "\n".join(lines)
                 ),
             )

@@ -302,6 +302,32 @@ def _make_provider(config, model: str | None = None):
     )
 
 
+def _make_provider_factory(config):
+    """Return a callable ``(model_name) -> LLMProvider`` for runtime model switching.
+
+    Unlike ``_make_provider``, this never calls ``typer.Exit`` — it raises
+    ``ValueError`` so the caller can show a user-friendly message.
+    """
+    from nanobot.providers.litellm_provider import LiteLLMProvider
+
+    aliases = config.agents.defaults.model_aliases
+
+    def factory(model: str) -> LiteLLMProvider:
+        model = aliases.get(model, model)
+        p = config.get_provider(model)
+        if not (p and p.api_key):
+            raise ValueError(f"No API key configured for model '{model}'")
+        return LiteLLMProvider(
+            api_key=p.api_key,
+            api_base=config.get_api_base(model),
+            default_model=model,
+            extra_headers=p.extra_headers,
+            provider_name=config.get_provider_name(model),
+        )
+
+    return factory
+
+
 # ============================================================================
 # Gateway / Server
 # ============================================================================
@@ -331,6 +357,8 @@ def gateway(
     config = load_config()
     bus = MessageBus()
     provider = _make_provider(config)
+    provider_factory = _make_provider_factory(config)
+    model_aliases = config.agents.defaults.model_aliases
     session_manager = SessionManager(config.workspace_path)
     
     # Create cron service first (callback set after agent creation)
@@ -374,6 +402,8 @@ def gateway(
                 specialist_description=spec.description,
                 specialist_prompt=spec.system_prompt,
                 tool_filter=spec.tools if spec.tools else None,
+                provider_factory=provider_factory,
+                model_aliases=model_aliases,
             )
             agents[spec.name] = agent_loop
 
@@ -404,6 +434,8 @@ def gateway(
             cron_service=cron,
             restrict_to_workspace=config.tools.restrict_to_workspace,
             session_manager=session_manager,
+            provider_factory=provider_factory,
+            model_aliases=model_aliases,
         )
         runner = default_agent
 
@@ -496,6 +528,7 @@ def agent(
     
     bus = MessageBus()
     provider = _make_provider(config)
+    provider_factory = _make_provider_factory(config)
 
     if logs:
         logger.enable("nanobot")
@@ -514,6 +547,8 @@ def agent(
         brave_api_key=config.tools.web.search.api_key or None,
         exec_config=config.tools.exec,
         restrict_to_workspace=config.tools.restrict_to_workspace,
+        provider_factory=provider_factory,
+        model_aliases=config.agents.defaults.model_aliases,
     )
     
     # Show spinner when logs are off (no output to miss); skip when logs are on
@@ -838,6 +873,107 @@ def status():
             else:
                 has_key = bool(p.api_key)
                 console.print(f"{spec.label}: {'[green]✓[/green]' if has_key else '[dim]not set[/dim]'}")
+
+
+# ============================================================================
+# Provider Query Commands (models / usage)
+# ============================================================================
+
+_QUERYABLE_PROVIDERS = {"moonshot", "doubao", "dashscope"}
+
+
+def _iter_configured_providers(config, only: str | None = None):
+    """Yield (spec, provider_config, api_base) for configured & queryable providers."""
+    from nanobot.providers.registry import PROVIDERS, find_by_name
+
+    for spec in PROVIDERS:
+        if spec.name not in _QUERYABLE_PROVIDERS:
+            continue
+        if only and spec.name != only:
+            continue
+        p = getattr(config.providers, spec.name, None)
+        if not p or not p.api_key:
+            continue
+        api_base = p.api_base or spec.default_api_base
+        if not api_base:
+            continue
+        yield spec, p, api_base
+
+
+@app.command()
+def models(
+    provider: str = typer.Option(
+        None, "--provider", "-p",
+        help="Only query this provider (moonshot/doubao/dashscope)",
+    ),
+):
+    """List available models from configured providers."""
+    from nanobot.config.loader import load_config
+    from nanobot.providers.query import list_models
+
+    config = load_config()
+    found_any = False
+
+    for spec, p, api_base in _iter_configured_providers(config, provider):
+        found_any = True
+        console.print(f"\n[bold cyan]{spec.label}[/bold cyan]  ({api_base})")
+        try:
+            items = list_models(api_base, p.api_key)
+            if not items:
+                console.print("  [dim]No models returned[/dim]")
+                continue
+            table = Table(show_header=True, box=None, pad_edge=False)
+            table.add_column("Model ID", style="green")
+            table.add_column("Owned By", style="dim")
+            for m in items:
+                table.add_row(m.id, m.owned_by)
+            console.print(table)
+        except Exception as e:
+            console.print(f"  [red]Error: {e}[/red]")
+
+    if not found_any:
+        if provider:
+            console.print(f"[yellow]Provider '{provider}' is not configured or has no API key.[/yellow]")
+        else:
+            console.print("[yellow]No queryable providers configured (moonshot/doubao/dashscope).[/yellow]")
+            console.print("Add API keys in ~/.nanobot/config.json")
+
+
+@app.command()
+def usage(
+    provider: str = typer.Option(
+        None, "--provider", "-p",
+        help="Only query this provider (moonshot/doubao/dashscope)",
+    ),
+):
+    """Show balance / usage for configured providers."""
+    from nanobot.config.loader import load_config
+    from nanobot.providers.query import query_balance
+
+    config = load_config()
+    found_any = False
+
+    for spec, p, api_base in _iter_configured_providers(config, provider):
+        found_any = True
+        console.print(f"\n[bold cyan]{spec.label}[/bold cyan]")
+        info = query_balance(spec.name, api_base, p.api_key)
+        if info is None:
+            console.print("  [dim]Balance API not available for this provider[/dim]")
+        elif info.available:
+            currency = f" {info.currency}" if info.currency else ""
+            console.print(f"  Available balance: [green]{info.available}{currency}[/green]")
+            if info.raw:
+                for k, v in info.raw.items():
+                    if k not in ("available_balance", "balance", "currency"):
+                        console.print(f"  {k}: {v}")
+        else:
+            console.print("  [dim]No balance info returned[/dim]")
+
+    if not found_any:
+        if provider:
+            console.print(f"[yellow]Provider '{provider}' is not configured or has no API key.[/yellow]")
+        else:
+            console.print("[yellow]No queryable providers configured (moonshot/doubao/dashscope).[/yellow]")
 
 
 if __name__ == "__main__":
